@@ -1,5 +1,5 @@
 {
-  "name": "ts",
+  "name": "parse-trace",
   "version": "1.0.0",
   "description": "",
   "main": "src/index.ts",
@@ -8,9 +8,16 @@
   "keywords": [],
   "devDependencies": {
     "@total-typescript/ts-reset": "*",
-    "@types/jest": "*"
+    "@types/jest": "*",
+    "@types/node": "*"
   },
   "scripts": {
     "test": "utr src/index.ts"
+  },
+  "dependencies": {
+    "@tracerbench/trace-model": "*",
+    "chrome-devtools-frontend": "file:../devtools-frontend",
+    "global-jsdom": "*",
+    "utils": "file:../utils"
   }
 }
