@@ -1,129 +1,267 @@
-import { TracingModel, TimelineModel, Helpers, makeCompleteEvent, TraceEvents, TimelineProfileTree, TopDownRootNode, BottomUpRootNode, TimelineModelFilter } from 'chrome-devtools-frontend/entry.ts'
-import type { CPUProfileDataModel } from 'chrome-devtools-frontend/front_end/models/cpu_profile/cpu_profile'
-import type { TraceEventData } from 'chrome-devtools-frontend/front_end/models/trace/types/TraceEvents'
-import { ILocation, buildModel } from './build-model.ts'
-import { median } from 'utils'
+import { mean, median, sum } from 'utils'
 
+export type TraceEvent = {
+  ts: number
+} & ({
+  name: 'Profile'
+  args: {
+    data: Profile
+  }
+} | {
+  name: 'ProfileChunk'
+  args: {
+    data: ProfileData
+  }
+})
 export interface ProfileJson {
-  profile: Profile
+  profile: CpuProfile
 }
 export interface Profile {
-  nodes: Node[]
+  startTime: number
 }
-export interface Node {
+export interface ProfileData {
+  cpuProfile: CpuProfile
+  lines: number[]
+  timeDeltas: number[]
+}
+export interface CpuProfile {
+  nodes: ProfileNode[]
+  samples: number[]
+}
+interface ProfileNode {
   id: number
+  parent: number | undefined
   callFrame: {
     functionName: string
-    scriptId: string
+    scriptId: number
     url: string
     lineNumber: number
     columnNumber: number
   }
-  hitCount: number
-  children: number[]
-  positionTicks: {
-    line: number
-    ticks: number
-  }[]
 }
 
-export function parseProfile({ profile }: ProfileJson, microseconds: number) {
-  const hits = {}
-  profile.nodes.forEach((n: Node) => {
-    hits[n.id] = n.hitCount
-  })
-  const res = buildModel(profile as any)
-
-  const uid = (x: ILocation) => {
-    return `${x.callFrame.functionName} ${x.id}`
-  }
-
-  const results = Object.fromEntries(res.locations
-    .filter(x => x.selfTime)
-    .sort((a, b) =>
-      b.selfTime - a.selfTime
-    ).map(x =>
-      [
-        uid(x),
-        { t: x.selfTime / (hits[x.id] || 1) / 1000/*  * microseconds */, h: hits[x.id] }
-      ] as const
-    )
-    .sort(([, a], [, b]) => b.t - a.t)
-  )
-  return results
+interface Fn {
+  id: string
+  name: string
+  line: number
+  col: number
+  scriptId: number
+  url: string
+  times: number[]
+  sum: number
+  mean: number
+  median: number
 }
 
-export async function parseTrace(events: TraceEventData[]) {
-  const timelineModel = new TimelineModel.TimelineModelImpl()
-  const tracingModel = new TracingModel()
+interface Node {
+  nodeId: number
+  fn: Fn
+  parent: number
+  parentNode: Node | undefined
+  startTime?: number | undefined
+  endTime?: number | undefined
+}
 
-  const results: any = new Map()
+interface Output {
+  name: string
+  url: string
+  line: number
+  col: number
+  real?: { url: string, line: string | number, column: string | number } | undefined
+  sum: number
+  mean: number
+  median: number
+}
 
-  tracingModel.addEvents(events)
-  tracingModel.tracingComplete()
-  timelineModel.setEvents(tracingModel)
+export function parseTrace(events: TraceEvent[]) {
+  const fns = new Map<string, Fn>()
+  const lns = new Map<number, number[]>()
+  const nodesById = new Map<number, Node>()
+  const scripts = new Map<number, string>()
+  const scriptLines = new Map<number, number>()
 
-  for (const { cpuProfileData: profile } of timelineModel.cpuProfiles() as { cpuProfileData: CPUProfileDataModel.CPUProfileDataModel }[]) {
-    if (!profile.samples || !profile.lines) continue
+  const stack: Node[] = []
 
-    const samplesIntegrator =
-      new Helpers.SamplesIntegrator.SamplesIntegrator(profile, events[0].pid, events[0].tid)
+  let startTime = 0
+  let endTime = 0
+  let i = 0
 
-    const profileCalls = samplesIntegrator?.buildProfileCalls(events)
-    if (profileCalls) {
-      events = Helpers.Trace.mergeEventsInOrder(events, profileCalls)
+  let e: TraceEvent
+  for (; i < events.length;) {
+    e = events[i++]
+    if (e.name === 'Profile') {
+      endTime = startTime = e.args.data.startTime
+
+      // beyond this, everything is ProfileChunk, so we
+      // break and iterate just for that
+      break
     }
-    const root: TopDownRootNode = new TimelineProfileTree.TopDownRootNode(events,
-      [], profile.profileStartTime, profile.profileEndTime, false, null) as any
+  }
+  for (; i < events.length; i++) {
+    e = events[i]
+    if (e.name !== 'ProfileChunk') break
 
-    const entries = [[...root.children().entries()]]
-    while (entries.length) {
-      for (const [key, node] of entries.pop() as any) {
-        if (node?.event?.callFrame?.functionName) {
-          const c = node.event.callFrame
-          const id = `${c.scriptId}:${c.lineNumber || 0} ${c.functionName}`
-          if (node.totalTime) {
-            if (results.has(id)) {
-              results.get(id).times.push(node.totalTime)
-            }
-            else {
-              results.set(id, {
-                name: id,
-                times: [node.totalTime]
-              })
-            }
-          }
-          const res = node.children()
-          entries.push([...res.entries()])
-        }
+    endTime = e.ts
+    const p = e.args.data
+
+    const {
+      cpuProfile: { nodes = [], samples = [] },
+      lines = [],
+      timeDeltas = []
+    } = p
+
+    for (const n of nodes) {
+      const { callFrame: c, id: nodeId, parent = 0 } = n
+
+      if (!scripts.has(c.scriptId)) scripts.set(c.scriptId, c.url)
+
+      const parentNode = nodesById.get(parent)
+      const line = c.lineNumber ?? parentNode?.fn.line ?? 0
+      const col = c.columnNumber ?? parentNode?.fn.col ?? 0
+      const scriptId = c.scriptId || parentNode?.fn.scriptId || 0
+      const id = `${scriptId}:${line}:${col} ${c.functionName}`
+
+      let fn = fns.get(id)!
+      if (!fns.has(id)) {
+        fns.set(id, fn = {
+          id,
+          name: c.functionName,
+          line: line + 1, // convert to 1-based for sourcemap resolution
+          col: col + 1,
+          url: c.url,
+          scriptId,
+          times: [],
+          sum: 0,
+          mean: 0,
+          median: 0,
+        })
       }
+
+      nodesById.set(nodeId, { nodeId, parent, parentNode, fn })
+    }
+
+    let x = 0
+    let time = e.ts
+
+    // (root)
+    let node: Node | undefined
+    stack.push(node = nodesById.get(1)!)
+    node.startTime = time
+
+    for (const nodeId of samples) {
+      const line = lines[x] // 1-based
+      const delta = timeDeltas[x]
+
+      let ln = lns.get(line)
+      if (!ln) lns.set(line, ln = [])
+      ln.push(delta)
+
+      node = nodesById.get(nodeId)!
+
+      scriptLines.set(line, node.fn.scriptId)
+
+      let j: number
+      const thisStack: Node[] = []
+      do {
+        j = stack.findIndex(s => s.nodeId === node!.nodeId)
+        if (j >= 0) break
+        node.startTime = time
+        thisStack.unshift(node)
+        node = node.parentNode
+      } while (node)
+
+      const removed = stack.splice(j + 1)
+      if (removed.length) {
+        removed.forEach(s => {
+          if (s.startTime) {
+            s.endTime = time
+            s.fn.times.push(s.endTime - s.startTime)
+            delete s.startTime
+          }
+        })
+        // console.log(stack.map(s => s.fn.name).join('>'))
+      }
+
+      stack.push(...thisStack)
+
+      let visited = new Set<Fn>()
+      stack.forEach(s => {
+        if (visited.has(s.fn)) return
+        visited.add(s.fn)
+        s.fn.sum += delta
+      })
+
+      time += delta
+      x++
     }
   }
 
-  for (const result of results.values() as any) {
-    // result.time = average(result.times) //(result.times.length > 2 ? median(result.times) : result.times[0]) || 0
-    result.time = (result.times.length > 2 ? median(result.times) : result.times[0]) || 0
-    delete result.times
+  const totalTime = (endTime - startTime) / 1000
+
+  const junk = 2
+  for (const fn of fns.values()) {
+    fn.mean = mean(fn.times.slice(junk)) / 1000
+    fn.median = median(fn.times.slice(junk)) / 1000
   }
 
-  // const sorted = [...Object.entries(results)]
-  const sorted = [...results.entries()]
-    .sort(([, a]: any, [, b]: any) => b.time - a.time) as any
-
-  for (const [k, n] of sorted.slice(0, 100)) {
-    console.log(`${n.time.toFixed(3)} ${n.name}`)
+  const output: Output[] = []
+  // const linesUsed = new Set()
+  for (const fn of [...fns.values()]
+    .sort((a, b) => b.mean - a.mean)
+  ) {
+    output.push({
+      name: fn.name,
+      url: `${fn.url ?? fn.scriptId ?? '0'}`,
+      line: fn.line,
+      col: fn.col,
+      sum: (1 / (totalTime / (fn.sum / 1000))),
+      mean: fn.mean,
+      median: fn.median,
+    })
+    // linesUsed.add(fn.line)
+    // output.push([
+    //   (scripts.get(+fn.id.split(':')[0]) ?? '0') + ':' + fn.id.split(':').slice(1).join(':'),
+    //   (1 / (totalTime / (fn.sum / 1000))).toFixed(2), fn.mean.toFixed(2), fn.median.toFixed(2),
+    // ])
+    // console.log(!fn.sum ? 0 : ((1 / ((totalTime / 16.666666) / fn.sum)) * 16.66666).toFixed(1), fn.id)
   }
 
-  // return data
+  for (const [line, deltas] of [...lns.entries()]
+    .sort(([a], [b]) => a - b)) {
+    // if (linesUsed.has(line)) continue
+    const total = sum(deltas) / 1000
+    const avgPerSec = (total / totalTime) * 1000
+    output.push({
+      name: '',
+      line,
+      col: 1,
+      url: (scripts.get(scriptLines.get(line) ?? 0) ?? '0'),
+      sum: total,
+      mean: avgPerSec,
+      median: avgPerSec,
+    })
+    // console.log(fn)
+    // const fn = lnFns.get(line - 1)
+    // console.log(
+    //   fn?.id ?? line,
+    //   sum(deltas) / 1000,
+    //   ((fn?.lines && sum(fn?.lines) || 0) / 1000) || ''
+    // )
+  }
+
+  return output
 }
 
-export function test_parseTrace() {
-  // @env browser
+export async function test_parseTrace() {
+  // @env no
+  const fsp = await import('fs/promises')
   describe('parseTrace', () => {
     it('works', async () => {
-      const json = await (await fetch('./trace.json')).json() as any
+      // const json = await (await fetch('./trace.json')).json() as any
+      const json = JSON.parse(await fsp.readFile('./trace.json', 'utf-8')) as any
       const result = await parseTrace(json.traceEvents)
       console.log(result)
+      // console.log(result.map(x => x.join(' ')).join('\n'))
     })
   })
 }
