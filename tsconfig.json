@@ -1,8 +1,6 @@
 {
   "include": [
-    "ambient.d.ts",
-    "src",
-    "examples"
+    "src"
   ],
   "compilerOptions": {
     "rootDir": ".",
@@ -24,16 +22,23 @@
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true,
     "esModuleInterop": true,
-    "noImplicitAny": false,
+    "noImplicitAny": true,
     "noErrorTruncation": true,
+    "noImplicitThis": true,
+    // "noUncheckedIndexedAccess": true,
+    // "isolatedModules": true,
+    // "inlineSources": true,
+    // "declaration": true,
+    // "noUnusedLocals": true,
     "skipDefaultLibCheck": true,
     "skipLibCheck": true,
     "sourceMap": true,
     "allowJs": true,
     "strict": true,
-    // "noImplicitThis": true,
-    // "noUncheckedIndexedAccess": true,
-    // "isolatedModules": true,
-    // "noUnusedLocals": true,
+    "types": [
+      "ambient-dts",
+      "@types/node",
+      "bun-types"
+    ]
   }
 }

@@ -1,23 +1,20 @@
 {
   "name": "parse-trace",
+  "author": "stagas",
   "version": "1.0.0",
-  "description": "",
-  "main": "src/index.ts",
+  "description": "Parse chrome trace.",
+  "license": "AGPLv3",
   "type": "module",
-  "author": "",
-  "keywords": [],
+  "main": "src/index.ts",
   "devDependencies": {
-    "@total-typescript/ts-reset": "*",
-    "@types/jest": "*",
-    "@types/node": "*"
+    "ambient-dts": "github:stagas/ambient-dts",
+    "@types/node": "*",
+    "bun-types": "*"
   },
   "scripts": {
     "test": "utr src/index.ts"
   },
   "dependencies": {
-    "@tracerbench/trace-model": "*",
-    "chrome-devtools-frontend": "file:../devtools-frontend",
-    "global-jsdom": "*",
-    "utils": "file:../utils"
+    "utils": "github:stagas/utils"
   }
 }
